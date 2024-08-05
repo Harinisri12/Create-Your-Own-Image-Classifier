@@ -8,10 +8,15 @@ import os
 # Function to load a checkpoint
 def load_checkpoint(filepath):
     checkpoint = torch.load(filepath)
-    model = models.vgg16(pretrained=True)
-    for param in model.parameters():
-        param.requires_grad = False
-    model.classifier = checkpoint['classifier']
+    model = models.__dict__[checkpoint['arch']](pretrained=True)
+    in_features = model.classifier[0].in_features if hasattr(model.classifier, 'in_features') else model.classifier.in_features
+    model.classifier = nn.Sequential(
+        nn.Linear(in_features, checkpoint['hidden_units']),
+        nn.ReLU(),
+        nn.Dropout(0.5),
+        nn.Linear(checkpoint['hidden_units'], 102),
+        nn.LogSoftmax(dim=1)
+    )
     model.load_state_dict(checkpoint['state_dict'])
     model.class_to_idx = checkpoint['class_to_idx']
     return model
@@ -36,7 +41,7 @@ def predict(image_path, model, top_k=5):
         probs, classes = torch.exp(outputs).topk(top_k, dim=1)
     return probs[0].tolist(), classes[0].tolist()
 
-# Function to print the predictions
+# Function to print predictions
 def print_predictions(image_path, checkpoint_path, top_k=5, category_names_path=None, use_gpu=False):
     model = load_checkpoint(checkpoint_path)
     
