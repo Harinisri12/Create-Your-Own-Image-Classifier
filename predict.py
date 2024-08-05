@@ -36,8 +36,27 @@ def predict(image_path, model, top_k=5):
         probs, classes = torch.exp(outputs).topk(top_k, dim=1)
     return probs[0].tolist(), classes[0].tolist()
 
+# Function to print the predictions
+def print_predictions(image_path, checkpoint_path, top_k=5, category_names_path=None, use_gpu=False):
+    model = load_checkpoint(checkpoint_path)
+    
+    if use_gpu and torch.cuda.is_available():
+        model.to('cuda')
+    
+    probs, classes = predict(image_path, model, top_k=top_k)
+    
+    if category_names_path:
+        with open(category_names_path, 'r') as f:
+            cat_to_name = json.load(f)
+        classes = [cat_to_name[str(c)] for c in classes]
+    
+    print(f"Top {top_k} predictions:")
+    for prob, cls in zip(probs, classes):
+        print(f"{cls}: {prob:.3f}")
+
+# Main function to parse arguments and call print_predictions
 def main():
-    parser = argparse.ArgumentParser(description='Predict image class')
+    parser = argparse.ArgumentParser(description='Predict image class and print results')
     parser.add_argument('image_path', type=str, help='Path to the image')
     parser.add_argument('checkpoint', type=str, help='Path to the model checkpoint')
     parser.add_argument('--top_k', type=int, default=5, help='Return top K most likely classes')
@@ -46,21 +65,8 @@ def main():
 
     args = parser.parse_args()
     
-    model = load_checkpoint(args.checkpoint)
-    
-    if args.gpu and torch.cuda.is_available():
-        model.to('cuda')
-    
-    probs, classes = predict(args.image_path, model, top_k=args.top_k)
-    
-    if args.category_names:
-        with open(args.category_names, 'r') as f:
-            cat_to_name = json.load(f)
-        classes = [cat_to_name[str(c)] for c in classes]
-    
-    print(f"Top {args.top_k} classes:")
-    for prob, cls in zip(probs, classes):
-        print(f"{cls}: {prob:.3f}")
+    print_predictions(args.image_path, args.checkpoint, top_k=args.top_k, 
+                      category_names_path=args.category_names, use_gpu=args.gpu)
 
 if __name__ == '__main__':
     main()
