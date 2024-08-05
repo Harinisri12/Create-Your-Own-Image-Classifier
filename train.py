@@ -1,141 +1,118 @@
 import argparse
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torchvision import models, transforms, datasets
-from torch.utils.data import DataLoader
-import json
-import os
+import torchvision.models as models
+from torchvision import datasets, transforms
+from torch import nn, optim
+from collections import OrderedDict
 
-# Utility function to save the checkpoint
-def save_checkpoint(model, optimizer, epochs, train_data, filepath='checkpoint.pth'):
-    model.class_to_idx = train_data.class_to_idx
-    checkpoint = {
-        'classifier': model.classifier,
-        'state_dict': model.state_dict(),
-        'epochs': epochs,
-        'optim_stat_dict': optimizer.state_dict(),
-        'class_to_idx': model.class_to_idx
-    }
-    torch.save(checkpoint, filepath)
-    print(f"Checkpoint saved to {filepath}")
-
-# Function to load the checkpoint
-def load_checkpoint(filepath):
-    checkpoint = torch.load(filepath)
-    model = models.vgg16(pretrained=True)
-    for param in model.parameters():
-        param.requires_grad = False
-    model.classifier = checkpoint['classifier']
-    model.load_state_dict(checkpoint['state_dict'])
-    model.class_to_idx = checkpoint['class_to_idx']
+# Function to get the model
+def get_model(arch, hidden_units):
+    if arch == 'vgg16':
+        model = models.vgg16(pretrained=True)
+        in_features = model.classifier[0].in_features
+        model.classifier = nn.Sequential(
+            nn.Linear(in_features, hidden_units),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(hidden_units, 102),
+            nn.LogSoftmax(dim=1)
+        )
+    elif arch == 'densenet121':
+        model = models.densenet121(pretrained=True)
+        in_features = model.classifier.in_features
+        model.classifier = nn.Sequential(
+            nn.Linear(in_features, hidden_units),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(hidden_units, 102),
+            nn.LogSoftmax(dim=1)
+        )
+    else:
+        raise ValueError("Architecture not supported.")
     return model
 
-# Define training function
-def train_model(model, criterion, optimizer, dataloaders, num_epochs=5):
-    model.to('cuda')
-    for epoch in range(num_epochs):
+# Function to save the checkpoint
+def save_checkpoint(model, optimizer, epochs, arch, hidden_units, path):
+    checkpoint = {
+        'arch': arch,
+        'hidden_units': hidden_units,
+        'epochs': epochs,
+        'state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'class_to_idx': train_data.class_to_idx
+    }
+    torch.save(checkpoint, path)
+
+# Training function
+def train_model(model, criterion, optimizer, trainloader, validloader, epochs, gpu):
+    device = 'cuda' if gpu and torch.cuda.is_available() else 'cpu'
+    model.to(device)
+    
+    for epoch in range(epochs):
         model.train()
-        running_loss = 0.0
-        for inputs, labels in dataloaders['train']:
-            inputs, labels = inputs.to('cuda'), labels.to('cuda')
+        running_loss = 0
+        for images, labels in trainloader:
+            images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            output = model(images)
+            loss = criterion(output, labels)
             loss.backward()
             optimizer.step()
-            running_loss += loss.item() * inputs.size(0)
+            running_loss += loss.item()
         
-        train_loss = running_loss / len(dataloaders['train'].dataset)
-        valid_loss, accuracy = validate_model(model, criterion, dataloaders)
-        print(f"Epoch {epoch + 1}/{num_epochs}")
-        print(f"Train Loss: {train_loss:.3f}")
-        print(f"Valid Loss: {valid_loss:.3f}")
-        print(f"Accuracy: {accuracy:.3f}%\n")
-
-def validate_model(model, criterion, dataloaders):
-    model.eval()
-    running_loss = 0.0
-    running_corrects = 0
-    with torch.no_grad():
-        for inputs, labels in dataloaders['valid']:
-            inputs, labels = inputs.to('cuda'), labels.to('cuda')
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            running_loss += loss.item() * inputs.size(0)
-            _, preds = torch.max(outputs, 1)
-            running_corrects += torch.sum(preds == labels.data)
-    valid_loss = running_loss / len(dataloaders['valid'].dataset)
-    accuracy = (running_corrects.double() / len(dataloaders['valid'].dataset)) * 100
-    return valid_loss, accuracy
-
+        # Validation
+        model.eval()
+        valid_loss = 0
+        corrects = 0
+        total = 0
+        with torch.no_grad():
+            for images, labels in validloader:
+                images, labels = images.to(device), labels.to(device)
+                output = model(images)
+                valid_loss += criterion(output, labels).item()
+                _, predicted = torch.max(output, 1)
+                total += labels.size(0)
+                corrects += (predicted == labels).sum().item()
+        
+        print(f"Epoch {epoch+1}/{epochs}")
+        print(f"Training Loss: {running_loss/len(trainloader):.3f}")
+        print(f"Validation Loss: {valid_loss/len(validloader):.3f}")
+        print(f"Validation Accuracy: {corrects/total:.3f}")
+    
+# Main function to parse arguments and start training
 def main():
-    parser = argparse.ArgumentParser(description='Train a deep learning model')
-    parser.add_argument('data_dir', type=str, help='Directory containing the dataset')
-    parser.add_argument('--save_dir', type=str, default='.', help='Directory to save the checkpoint')
-    parser.add_argument('--arch', type=str, default='vgg16', help='Model architecture')
+    parser = argparse.ArgumentParser(description='Train a neural network on image data')
+    parser.add_argument('data_directory', type=str, help='Directory of the image dataset')
+    parser.add_argument('save_dir', type=str, help='Directory to save the model checkpoint')
+    parser.add_argument('--arch', type=str, choices=['vgg16', 'densenet121'], default='vgg16', help='Model architecture')
+    parser.add_argument('--hidden_units', type=int, default=512, help='Number of hidden units')
+    parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='Learning rate')
-    parser.add_argument('--hidden_units', type=int, default=4096, help='Number of hidden units')
-    parser.add_argument('--epochs', type=int, default=5, help='Number of epochs')
     parser.add_argument('--gpu', action='store_true', help='Use GPU for training')
-    
+
     args = parser.parse_args()
-    
-    data_transforms = {
-        'train': transforms.Compose([
-            transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ]),
-        'valid': transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ]),
-        'test': transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-    }
-    
-    image_datasets = {
-        'train': datasets.ImageFolder(root=os.path.join(args.data_dir, 'train'), transform=data_transforms['train']),
-        'valid': datasets.ImageFolder(root=os.path.join(args.data_dir, 'valid'), transform=data_transforms['valid']),
-        'test': datasets.ImageFolder(root=os.path.join(args.data_dir, 'test'), transform=data_transforms['test'])
-    }
-    
-    dataloaders = {
-        'train': DataLoader(image_datasets['train'], batch_size=32, shuffle=True),
-        'valid': DataLoader(image_datasets['valid'], batch_size=32, shuffle=False),
-        'test': DataLoader(image_datasets['test'], batch_size=32, shuffle=False)
-    }
-    
-    model = models.__dict__[args.arch](pretrained=True)
-    for param in model.parameters():
-        param.requires_grad = False
-    
-    classifier = nn.Sequential(
-        nn.Linear(25088, args.hidden_units),
-        nn.ReLU(),
-        nn.Dropout(0.5),
-        nn.Linear(args.hidden_units, 102),
-        nn.LogSoftmax(dim=1)
-    )
-    model.classifier = classifier
-    
+
+    # Data loading
+    train_transforms = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    train_data = datasets.ImageFolder(root=args.data_directory + '/train', transform=train_transforms)
+    valid_data = datasets.ImageFolder(root=args.data_directory + '/valid', transform=train_transforms)
+
+    trainloader = torch.utils.data.DataLoader(train_data, batch_size=64, shuffle=True)
+    validloader = torch.utils.data.DataLoader(valid_data, batch_size=64)
+
+    # Model, criterion, optimizer
+    model = get_model(args.arch, args.hidden_units)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.classifier.parameters(), lr=args.learning_rate)
-    
-    if args.gpu and torch.cuda.is_available():
-        model.to('cuda')
-    
-    train_model(model, criterion, optimizer, dataloaders, num_epochs=args.epochs)
-    
-    save_checkpoint(model, optimizer, args.epochs, image_datasets['train'], filepath=os.path.join(args.save_dir, 'checkpoint.pth'))
+    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+
+    train_model(model, criterion, optimizer, trainloader, validloader, args.epochs, args.gpu)
+    save_checkpoint(model, optimizer, args.epochs, args.arch, args.hidden_units, os.path.join(args.save_dir, 'checkpoint.pth'))
 
 if __name__ == '__main__':
     main()
